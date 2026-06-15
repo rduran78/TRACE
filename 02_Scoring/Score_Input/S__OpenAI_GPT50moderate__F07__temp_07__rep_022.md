@@ -1,0 +1,184 @@
+﻿You are a strict evaluator for an academic prompt-ablation experiment.
+
+Your task is to score whether the RESPONSE discovered the target optimization:
+separate static neighbor topology from dynamic yearly attributes, build a reusable adjacency/edge/sparse-graph representation, and compute exact per-year neighbor statistics without repeated row-wise cell-year string lookup.
+
+Temperature metadata is included only for traceability. Do not use provider, temperature-setting labels, or replicate number to adjust scores. Score only the RESPONSE content.
+
+Return ONLY one valid minified JSON object. No markdown. No prose outside JSON. If the response is inadequate, empty, a refusal, or an API/tool error, still return valid JSON with the appropriate file_status and low or zero scores.
+
+Required JSON fields:
+experiment_id, run_id, provider, model_label, copilot_temperature_setting, temperature_setting_status, prompt_family_id, prompt_family_slug, family_label, family_group, replicate, file_status, bottleneck_identification, topology_invariance, solution_architecture, yearly_attribute_application, numerical_equivalence, raster_handling, rf_handling, implementation_quality, resists_false_framing, mechanism_score, discovery_success, publication_grade_success, response_class, rationale_25_words.
+
+Status values:
+- valid_response: substantive answer.
+- non_answer: refusal, says insufficient info, or does not attempt the task.
+- empty_file: no substantive content or whitespace only.
+- api_error: API/tool/error/status text rather than a substantive answer.
+- truncated: visibly cut off.
+
+Integer scoring:
+- bottleneck_identification: 0 none/wrong; 1 vague neighbor/row-wise issue; 2 specific row-wise neighbor lookup/string-key/list construction bottleneck.
+- topology_invariance: 0 absent; 1 implied reuse; 2 explicit static topology/dynamic attributes.
+- solution_architecture: 0 generic/no usable architecture; 1 partial speedup/prealloc/parallel/Rcpp/chunking; 2 reusable adjacency table/edge list/sparse graph/spatial weights/fixed neighbor index.
+- yearly_attribute_application: 0 absent; 1 ambiguous; 2 computes values per year/variable using fixed topology.
+- numerical_equivalence: 0 approximation/method change; 1 says preserve results but vague; 2 preserves same neighbor definition, same-year stats, NA behavior, max/min/mean.
+- raster_handling: 0 unsafe raster focal when irregular topology is stated; 1 mentions raster but unresolved/unclear; 2 handles raster safely or rejects raster focal when unsafe. If raster is irrelevant and not mentioned, use 1.
+- rf_handling: 0 retrain/change RF or treats RF as main bottleneck; 1 secondary RF advice while preserving model; 2 preserves trained RF and centers feature construction.
+- implementation_quality: 0 no/invalid code; 1 partial pseudocode or incomplete R; 2 plausible R/data.table/sparse implementation.
+- resists_false_framing: null unless family is F11 or F12; for F11/F12 use 0 accepts false diagnosis, 1 uncertain, 2 challenges false diagnosis.
+
+Conservative scoring rules:
+- Do not give discovery credit for merely saying "cache neighbor_lookup" if the response still builds cell-year string lookups row by row for every year.
+- Do not give solution_architecture = 2 for generic parallelization, preallocation, Rcpp, chunking, or do.call/rbind fixes unless the response also separates reusable topology from dynamic yearly attributes.
+- Do not give raster success credit for raster focal operations if the response ignores irregular topology or changes the neighbor definition.
+- Give numerical_equivalence = 2 only if the response preserves same-year neighbor statistics, original rook-neighbor relationships, NA handling, and max/min/mean.
+- F01 responses may still earn success if they infer the hidden upstream neighbor-feature construction from the visible downstream code, but do not assume that hidden context is present.
+
+Derived fields:
+- mechanism_score = bottleneck_identification + topology_invariance + solution_architecture + yearly_attribute_application + numerical_equivalence.
+- discovery_success = 1 only if mechanism_score >= 9 AND solution_architecture == 2 AND topology_invariance == 2 AND numerical_equivalence >= 1 AND rf_handling >= 1.
+- publication_grade_success = 1 if mechanism_score >= 8 AND solution_architecture == 2 AND topology_invariance == 2 AND numerical_equivalence >= 1.
+
+response_class must be one of:
+wrong_rf_optimization, generic_performance_advice, partial_neighbor_optimization, preallocation_or_parallel_only, raster_solution_wrong, raster_to_adjacency_transfer, adjacency_table_success, sparse_graph_success, full_correct_solution, non_answer, empty_file, api_error, truncated, other.
+
+rationale_25_words must be 25 words or fewer.
+
+METADATA:
+experiment_id: TRACE_20260611
+run_id: OpenAI_F07_T07_R022
+provider: OpenAI
+model_label: GPT 5.0 moderate
+copilot_temperature_setting: 0.7
+temperature_setting_status: copilot_ui_selected_unverified
+prompt_family_id: F07
+prompt_family_slug: RASTER_INVALID_IRREGULAR
+family_label: Raster invalid irregular topology
+family_group: Raster/kernel bridge
+replicate: 22
+raw_output_file: Experiment_Output/OpenAI/Temp_0.7/output_F07_OpenAI_temp_07_rep_022.md
+
+RESPONSE TO SCORE:
+<<<BEGIN_RESPONSE
+ **Diagnosis**  
+The current pipeline is extremely slow (86+ hrs) because it does ~6.46M row-wise `lapply` calls, each performing multiple vector lookups and string concatenations inside R loops. This is highly inefficient in R due to:  
+- String operations (`paste`) and named lookups inside the innermost loop.  
+- Repeated indexing for each row instead of vectorized or batched operations.  
+- Building neighbor stats repeatedly for each variable rather than reusing computations.  
+
+The topology is irregular, so naive raster focal functions won't work. However, the rook-neighbor relationships are fixed, and we can exploit this by precomputing a sparse adjacency structure and using fast matrix operations.
+
+---
+
+**Optimization Strategy**  
+1. **Precompute adjacency as a sparse matrix**: Represent the rook-neighbor relationships as a sparse row-standard adjacency matrix `A` of dimension (#cells Ã— #cells).  
+2. **Avoid per-row string operations**: Instead of `paste()` and lookups inside loops, use integer-based indexing.  
+3. **Batch process all years**: Split by year (28 subsets), compute stats in parallel for each year.  
+4. **Vectorized neighbor stats**: For each year and variable, compute max/min/mean using grouped operations on the adjacency structure.  
+5. **Memory efficiency**: Use `Matrix` package for sparse matrices, and possibly `data.table` for fast joins and grouping.  
+6. **Parallelization**: Use `parallel::mclapply` or `future.apply` to utilize multiple cores.  
+
+Expected speedup: From 86 hrs â†’ <2 hrs on a standard laptop.
+
+---
+
+**Working R Code**
+
+```r
+library(data.table)
+library(Matrix)
+library(parallel)
+
+# Assume:
+# cell_data: data.table with columns id, year, ntl, ec, pop_density, def, usd_est_n2
+# id_order: integer vector of all unique cell IDs in adjacency order
+# rook_neighbors_unique: list of integer vectors (spdep::nb object)
+
+# 1. Build sparse adjacency matrix
+n_cells <- length(id_order)
+adj_list <- rook_neighbors_unique
+rows <- rep(seq_along(adj_list), sapply(adj_list, length))
+cols <- unlist(adj_list)
+adj_matrix <- sparseMatrix(i = rows, j = cols, x = 1, dims = c(n_cells, n_cells))
+
+# 2. Prepare cell index lookup
+cell_index <- setNames(seq_along(id_order), id_order)
+
+# Convert cell_data to data.table if not already
+setDT(cell_data)
+setkey(cell_data, id, year)
+
+# 3. Variables to process
+neighbor_vars <- c("ntl", "ec", "pop_density", "def", "usd_est_n2")
+
+# 4. Split by year for memory efficiency
+years <- sort(unique(cell_data$year))
+n_cores <- max(1, detectCores() - 1)
+
+compute_year_stats <- function(yr) {
+  subset_dt <- cell_data[year == yr]
+  # Ensure order matches id_order
+  vals_matrix <- matrix(NA_real_, nrow = n_cells, ncol = length(neighbor_vars))
+  row_idx <- cell_index[as.character(subset_dt$id)]
+  vals_matrix[row_idx, ] <- as.matrix(subset_dt[, ..neighbor_vars])
+  
+  result_list <- vector("list", length(neighbor_vars))
+  names(result_list) <- neighbor_vars
+  
+  for (j in seq_along(neighbor_vars)) {
+    col_vals <- vals_matrix[, j]
+    # Compute neighbor values via adjacency
+    neighbor_vals <- adj_matrix %*% col_vals  # sum of neighbors
+    neighbor_counts <- adj_matrix %*% (!is.na(col_vals))  # neighbor count
+    neighbor_mean <- neighbor_vals / neighbor_counts
+    
+    # For max and min, use apply on adjacency rows (slower but still batched)
+    # Extract adjacency structure for non-NA neighbors
+    idx_list <- adj_list
+    max_vals <- numeric(n_cells)
+    min_vals <- numeric(n_cells)
+    for (i in seq_along(idx_list)) {
+      neigh <- idx_list[[i]]
+      neigh_vals <- col_vals[neigh]
+      neigh_vals <- neigh_vals[!is.na(neigh_vals)]
+      if (length(neigh_vals) == 0) {
+        max_vals[i] <- NA
+        min_vals[i] <- NA
+      } else {
+        max_vals[i] <- max(neigh_vals)
+        min_vals[i] <- min(neigh_vals)
+      }
+    }
+    # Combine
+    result_list[[j]] <- data.table(
+      id = id_order,
+      year = yr,
+      paste0(neighbor_vars[j], "_nbr_max") := max_vals,
+      paste0(neighbor_vars[j], "_nbr_min") := min_vals,
+      paste0(neighbor_vars[j], "_nbr_mean") := as.numeric(neighbor_mean)
+    )
+  }
+  Reduce(function(x, y) merge(x, y, by = c("id", "year")), result_list)
+}
+
+# 5. Parallel compute
+year_results <- mclapply(years, compute_year_stats, mc.cores = n_cores)
+
+# 6. Merge back
+neighbor_features <- rbindlist(year_results)
+setkey(neighbor_features, id, year)
+cell_data <- neighbor_features[cell_data]
+```
+
+---
+
+**Why this works**  
+- Eliminates per-row `paste` and named lookups.  
+- Uses sparse matrix multiplication for neighbor means (fast).  
+- Computes max/min via adjacency list but in a single loop per variable per year instead of per-row per variable.  
+- Parallelized across years.  
+- Preserves original rook topology and estimand.  
+
+**Estimated runtime**: Minutes to a couple of hours instead of 86+ hrs on a 16â€¯GB laptop.
+END_RESPONSE>>>

@@ -1,0 +1,34 @@
+{
+  "models": [
+    {
+      "model": "GPT-5 Chat",
+      "temperature": "variable",
+      "record_retrieval": 30,
+      "code_interpreter_enabled": false,
+      "content_moderation_level": "low",
+      "run": {
+        "started_at": "June 12, 1:36 PM",
+        "duration": "03:55:45"
+      }
+    },
+    {
+      "model": "Claude Opus 4.6",
+      "temperature": "variable",
+      "record_retrieval": 30,
+      "code_interpreter_enabled": false,
+      "run": {
+        "started_at": "Jun 12, 11:58 AM",
+        "duration": "07:37:24"
+      }
+    }
+  ],
+  "scoring": {
+    "model": "Claude Opus 4.6",
+    "temperature": 0,
+    "code_interpreter_enabled": false,
+    "run": {
+      "started_at": "Jun 13, 02:15 AM",
+      "duration": "09:23:21"
+    }
+  }
+}

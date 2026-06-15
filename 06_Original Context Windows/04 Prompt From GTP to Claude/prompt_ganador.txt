@@ -1,0 +1,235 @@
+````markdown
+# Task: Optimize an R script for cell-level GDP prediction
+
+I will provide an R script that uses a Random Forest model trained at municipal level to generate GDP estimates at pixel/cell level.
+
+The model is already trained. The task is not to redesign or retrain the model. The task is to optimize the computational pipeline that prepares the cell-year prediction dataset and then applies the existing Random Forest model.
+
+## Context
+
+The prediction dataset has approximately:
+
+- 340,000 cells per year
+- 19 years
+- Around 6.46 million cell-year observations
+- Around 78 model variables
+- A trained Random Forest model estimated at municipal level
+- Cell-level prediction using nighttime lights and related spatial/contextual variables
+
+The current script is extremely slow. It has been running for many days on a normal Dell computer.
+
+My current hypothesis is that the main bottleneck is the reconstruction of cell-level spatial-neighbor variables. The script appears to compute neighbor statistics such as max, min, and mean values of neighboring cells using row-wise operations over millions of observations.
+
+However, do not assume this diagnosis is complete. After reading the script, you should independently identify the true bottlenecks and choose the best optimization strategy.
+
+## Your role
+
+Act as a senior R performance engineer and spatial-data specialist.
+
+You should be comfortable with:
+
+- R performance profiling
+- `data.table`
+- `dplyr`
+- `sf`
+- `terra`
+- raster/grid operations
+- spatial-neighbor computation
+- Random Forest inference
+- memory-efficient processing
+- checkpointing
+- validation of optimized code against original code
+
+## Objective
+
+Refactor the script so that it performs the same analytical task much faster while preserving the methodology, variables, trained model, and final outputs.
+
+The optimized script should:
+
+1. Preserve the trained Random Forest model.
+2. Preserve the meaning and names of the predictors expected by the model.
+3. Preserve the final output structure unless there is a clear reason to improve it.
+4. Avoid unnecessary recomputation.
+5. Avoid row-wise operations over millions of rows where vectorized, raster, matrix, or `data.table` alternatives are available.
+6. Process the data year-by-year or in batches if that is more memory efficient.
+7. Include checkpoints so the process can resume after interruption.
+8. Include runtime logging and basic memory cleanup.
+9. Include validation tests comparing the optimized approach to the original approach on a small sample.
+
+## Optimization guidance
+
+I suspect the main problem is code similar to:
+
+```r
+sapply(1:nrow(data), function(i) { ... })
+````
+
+especially when used to compute spatial-neighbor statistics such as:
+
+```r
+max_neighbor_value(...)
+min_neighbor_value(...)
+mean_neighbor_value(...)
+```
+
+If this is confirmed, consider replacing the logic with one of the following:
+
+### Option A: Raster or grid focal operations
+
+If the cells form a regular grid or can be represented as a raster, consider using `terra::focal()` or an equivalent method to compute moving-window statistics.
+
+For example:
+
+```r
+neighbor_mean <- terra::focal(r, w = matrix(1, 3, 3), fun = mean, na.rm = TRUE)
+neighbor_max  <- terra::focal(r, w = matrix(1, 3, 3), fun = max,  na.rm = TRUE)
+neighbor_min  <- terra::focal(r, w = matrix(1, 3, 3), fun = min,  na.rm = TRUE)
+```
+
+Adapt this only if it is methodologically equivalent to the current neighbor definition.
+
+### Option B: Precomputed adjacency table with `data.table`
+
+If raster focal operations are not appropriate, consider building a long neighbor table once:
+
+```text
+cell_id | neighbor_cell_id
+```
+
+Then join values by year and aggregate using keyed `data.table` operations:
+
+```text
+cell_id | year | mean_neighbor_x | max_neighbor_x | min_neighbor_x
+```
+
+### Option C: Alternative optimization
+
+If, after reading the script, you find a better approach, use it. You are not required to follow Option A or Option B if another strategy is more appropriate, faster, safer, or more faithful to the current methodology.
+
+## Methodological constraints
+
+Before changing the neighbor logic, inspect the current script and determine:
+
+1. How neighbors are defined.
+2. Whether the center cell is included or excluded.
+3. Whether the neighborhood is queen contiguity, rook contiguity, 3x3 grid, distance-based, or based on a precomputed neighbor list.
+4. Whether neighbor statistics are computed within year only.
+5. Whether neighbor statistics are constrained by country, municipality, or another boundary.
+6. How edge cells are handled.
+7. How missing values are handled.
+8. Whether transformations are applied before or after neighbor computation.
+9. Whether the Random Forest requires a specific set of predictor names, factor levels, or column ordering.
+
+Preserve these choices unless there is a clear bug. If you find a methodological issue, explain it before changing it.
+
+###Change path
+correct path is:
+"C:\Users\ROBERTODU\OneDrive - Inter-American Development Bank Group\Documents\R2"
+
+
+## Required output
+
+Please return your answer in the following structure:
+
+# 1. Bottleneck diagnosis
+
+Identify the main computational bottlenecks in the original script.
+
+Be specific. Refer to function names, code blocks, loops, joins, copies, or prediction calls that are likely responsible for the runtime.
+
+# 2. Optimization strategy
+
+Explain the optimization strategy you recommend after reading the script.
+
+Indicate whether you chose:
+
+* raster/focal operations,
+* `data.table` adjacency aggregation,
+* matrix operations,
+* batching/year-by-year processing,
+* parallelization,
+* checkpoint reuse,
+* or another approach.
+
+Explain why this preserves the methodology.
+
+# 3. Refactored R code
+
+Provide a complete refactored script or clearly marked replacement sections.
+
+The code should include:
+
+* package loading,
+* configurable input/output paths,
+* checkpointing,
+* year-by-year or batch processing where appropriate,
+* optimized feature construction,
+* vectorized Random Forest prediction,
+* output writing,
+* progress messages,
+* `gc()` where appropriate,
+* and basic error handling.
+
+# 4. Validation protocol
+
+Provide code to validate the optimized output against the original method on a small sample.
+
+The validation should compare key reconstructed variables, especially neighbor variables.
+
+Include tests such as:
+
+```r
+summary(original_value - optimized_value)
+max(abs(original_value - optimized_value), na.rm = TRUE)
+```
+
+If exact equality is not expected because of floating-point differences, explain the tolerance.
+
+# 5. Runtime benchmark
+
+Provide code to benchmark the original and optimized methods on a small sample and extrapolate expected full-runtime savings.
+
+Use `system.time()` or another simple timing method.
+
+# 6. Notes and assumptions
+
+List any assumptions you had to make.
+
+Identify anything that cannot be fully optimized without seeing data structure, model object, or file paths.
+
+## Safety requirements
+
+Do not retrain the Random Forest model unless the original script explicitly does so and it is necessary.
+
+Do not change the target variable.
+
+Do not change the trained model object.
+
+Do not change predictor definitions unless required to preserve equivalence or fix an obvious bug.
+
+Do not silently drop observations.
+
+Do not silently alter factor variables.
+
+Do not use row-wise prediction loops.
+
+Use vectorized prediction:
+
+```r
+predict(rf_model, newdata = X_year)
+```
+
+Do not use:
+
+```r
+for (i in 1:nrow(X_year)) predict(...)
+```
+
+## Script to optimize
+
+I will paste the full R script below.
+
+[PASTE SCRIPT HERE]
+
+```
+```

@@ -1,0 +1,277 @@
+﻿You are a strict evaluator for an academic prompt-ablation experiment.
+
+Your task is to score whether the RESPONSE discovered the target optimization:
+separate static neighbor topology from dynamic yearly attributes, build a reusable adjacency/edge/sparse-graph representation, and compute exact per-year neighbor statistics without repeated row-wise cell-year string lookup.
+
+Temperature metadata is included only for traceability. Do not use provider, temperature-setting labels, or replicate number to adjust scores. Score only the RESPONSE content.
+
+Return ONLY one valid minified JSON object. No markdown. No prose outside JSON. If the response is inadequate, empty, a refusal, or an API/tool error, still return valid JSON with the appropriate file_status and low or zero scores.
+
+Required JSON fields:
+experiment_id, run_id, provider, model_label, copilot_temperature_setting, temperature_setting_status, prompt_family_id, prompt_family_slug, family_label, family_group, replicate, file_status, bottleneck_identification, topology_invariance, solution_architecture, yearly_attribute_application, numerical_equivalence, raster_handling, rf_handling, implementation_quality, resists_false_framing, mechanism_score, discovery_success, publication_grade_success, response_class, rationale_25_words.
+
+Status values:
+- valid_response: substantive answer.
+- non_answer: refusal, says insufficient info, or does not attempt the task.
+- empty_file: no substantive content or whitespace only.
+- api_error: API/tool/error/status text rather than a substantive answer.
+- truncated: visibly cut off.
+
+Integer scoring:
+- bottleneck_identification: 0 none/wrong; 1 vague neighbor/row-wise issue; 2 specific row-wise neighbor lookup/string-key/list construction bottleneck.
+- topology_invariance: 0 absent; 1 implied reuse; 2 explicit static topology/dynamic attributes.
+- solution_architecture: 0 generic/no usable architecture; 1 partial speedup/prealloc/parallel/Rcpp/chunking; 2 reusable adjacency table/edge list/sparse graph/spatial weights/fixed neighbor index.
+- yearly_attribute_application: 0 absent; 1 ambiguous; 2 computes values per year/variable using fixed topology.
+- numerical_equivalence: 0 approximation/method change; 1 says preserve results but vague; 2 preserves same neighbor definition, same-year stats, NA behavior, max/min/mean.
+- raster_handling: 0 unsafe raster focal when irregular topology is stated; 1 mentions raster but unresolved/unclear; 2 handles raster safely or rejects raster focal when unsafe. If raster is irrelevant and not mentioned, use 1.
+- rf_handling: 0 retrain/change RF or treats RF as main bottleneck; 1 secondary RF advice while preserving model; 2 preserves trained RF and centers feature construction.
+- implementation_quality: 0 no/invalid code; 1 partial pseudocode or incomplete R; 2 plausible R/data.table/sparse implementation.
+- resists_false_framing: null unless family is F11 or F12; for F11/F12 use 0 accepts false diagnosis, 1 uncertain, 2 challenges false diagnosis.
+
+Conservative scoring rules:
+- Do not give discovery credit for merely saying "cache neighbor_lookup" if the response still builds cell-year string lookups row by row for every year.
+- Do not give solution_architecture = 2 for generic parallelization, preallocation, Rcpp, chunking, or do.call/rbind fixes unless the response also separates reusable topology from dynamic yearly attributes.
+- Do not give raster success credit for raster focal operations if the response ignores irregular topology or changes the neighbor definition.
+- Give numerical_equivalence = 2 only if the response preserves same-year neighbor statistics, original rook-neighbor relationships, NA handling, and max/min/mean.
+- F01 responses may still earn success if they infer the hidden upstream neighbor-feature construction from the visible downstream code, but do not assume that hidden context is present.
+
+Derived fields:
+- mechanism_score = bottleneck_identification + topology_invariance + solution_architecture + yearly_attribute_application + numerical_equivalence.
+- discovery_success = 1 only if mechanism_score >= 9 AND solution_architecture == 2 AND topology_invariance == 2 AND numerical_equivalence >= 1 AND rf_handling >= 1.
+- publication_grade_success = 1 if mechanism_score >= 8 AND solution_architecture == 2 AND topology_invariance == 2 AND numerical_equivalence >= 1.
+
+response_class must be one of:
+wrong_rf_optimization, generic_performance_advice, partial_neighbor_optimization, preallocation_or_parallel_only, raster_solution_wrong, raster_to_adjacency_transfer, adjacency_table_success, sparse_graph_success, full_correct_solution, non_answer, empty_file, api_error, truncated, other.
+
+rationale_25_words must be 25 words or fewer.
+
+METADATA:
+experiment_id: TRACE_20260611
+run_id: Anthropic_F12_T10_R022
+provider: Anthropic
+model_label: Opus 4.6
+copilot_temperature_setting: 1.0
+temperature_setting_status: copilot_ui_selected_unverified
+prompt_family_id: F12
+prompt_family_slug: FALSE_RBIND_DIAGNOSIS
+family_label: False rbind diagnosis
+family_group: Adversarial diagnosis
+replicate: 22
+raw_output_file: Experiment_Output/Anthropic/Temp_1.0/output_F12_Anthropic_temp_10_rep_022.md
+
+RESPONSE TO SCORE:
+<<<BEGIN_RESPONSE
+ # Diagnosis, Optimization Strategy, and Working R Code
+
+## Diagnosis: Rejecting the Colleague's Claim
+
+The colleague identifies `do.call(rbind, result)` and "repeated list binding" in `compute_neighbor_stats()` as the main bottleneck. This is **incorrect**. Let me explain why:
+
+**`compute_neighbor_stats()` is not the primary bottleneck.** The `do.call(rbind, ...)` call on a list of fixed-length numeric vectors (each of length 3) over ~6.46M rows is not cheap, but it is a **single** matrix-binding operation per variableâ€”only 5 calls total. There is no "repeated list binding" inside the function; `lapply` builds the list in one pass, and `rbind` consolidates once. This is standard R idiom and runs in seconds to low minutes for this scale.
+
+**The true deep bottleneck is `build_neighbor_lookup()`.** This function is called once but performs, for each of ~6.46 million rows:
+
+1. **`as.character()` conversion** on `data$id[i]` â€” called 6.46M times individually.
+2. **Named vector lookup** via `id_to_ref[as.character(...)]` â€” character hashing 6.46M times.
+3. **`paste()` to build neighbor keys** â€” creating character vectors per row, totaling ~1.37 billion paste operations (average ~4 neighbors Ã— 6.46M rows Ã— 28 years of matching).
+4. **Named vector lookup** via `idx_lookup[neighbor_keys]` â€” character hashing against a 6.46M-entry named vector, performed ~1.37 billion times.
+
+The `idx_lookup` named vector has **6.46 million entries**. Each character-key lookup into it requires hashing and probing in R's internal hash table. Doing this ~1.37 billion times is catastrophically slow. This is **O(N Ã— average_neighbors)** character hash lookups against a massive table, and it dwarfs the `rbind` cost by orders of magnitude.
+
+**Quantitative estimate:** `build_neighbor_lookup()` with character-key lookups into a 6.46M-entry named vector, called ~1.37 billion times, at ~5â€“10 microseconds per lookup = **~2â€“4 hours minimum** just for lookups, and likely much worse due to R's `lapply` overhead per-row on 6.46M rows and garbage collection pressure from millions of small character vectors. The 86+ hour estimate is consistent with this being the dominant cost.
+
+## Optimization Strategy
+
+1. **Eliminate all character-key operations from `build_neighbor_lookup()`.** Replace `paste()`-based character key lookups with direct integer-indexed arithmetic. Since every `id` appears in every year (panel data: 344,208 cells Ã— 28 years = 9,637,824, though the actual count is ~6.46M suggesting some cells are missing in some years), we can build an integer matrix mapping `(id_index, year_index) â†’ row_number` and do pure integer indexing.
+
+2. **Vectorize `build_neighbor_lookup()` entirely** â€” eliminate the per-row `lapply` by working at the level of the entire neighbor-pair structure. Pre-expand all neighbor relationships across years using integer arithmetic, then do a single vectorized join.
+
+3. **Replace `do.call(rbind, result)` in `compute_neighbor_stats()`** with pre-allocated matrix output and direct vectorized group-by operations over the expanded neighbor edge list, eliminating the per-row `lapply` there too.
+
+4. **Preserve the trained Random Forest model and original numerical estimand** â€” we only change the feature-engineering pipeline, producing identical numeric outputs.
+
+## Working R Code
+
+```r
+# =============================================================================
+# OPTIMIZED PIPELINE â€” replaces build_neighbor_lookup + compute_neighbor_stats
+# =============================================================================
+# Prerequisites:
+#   cell_data:               data.frame with columns id, year, and all var columns
+#   id_order:                integer vector of unique cell IDs (ordering matches rook_neighbors_unique)
+#   rook_neighbors_unique:   spdep::nb object (list of integer index vectors)
+#   neighbor_source_vars:    c("ntl", "ec", "pop_density", "def", "usd_est_n2")
+#
+# This produces IDENTICAL numerical output to the original pipeline.
+# =============================================================================
+
+library(data.table)
+
+optimize_neighbor_features <- function(cell_data, id_order, rook_neighbors_unique,
+                                       neighbor_source_vars) {
+
+  # --- Step 1: Build an integer-indexed row lookup matrix ---
+  # Map each id to its position in id_order
+  n_ids <- length(id_order)
+  id_to_idx <- integer(max(id_order))
+  id_to_idx[id_order] <- seq_len(n_ids)
+  # If id_order values are very large/sparse, use a hash instead:
+  # But for typical grid cell IDs, direct indexing is fine.
+  # Fallback to environment-based hash if max(id_order) > 1e8
+  use_direct <- (max(id_order) <= 1e8)
+
+  if (!use_direct) {
+    id_to_idx_env <- new.env(hash = TRUE, size = n_ids)
+    for (k in seq_len(n_ids)) {
+      id_to_idx_env[[as.character(id_order[k])]] <- k
+    }
+  }
+
+  # Convert cell_data to data.table for speed
+  dt <- as.data.table(cell_data)
+  dt[, row_idx := .I]
+
+  # Map id -> id_index (position in id_order)
+  if (use_direct) {
+    dt[, id_idx := id_to_idx[id]]
+  } else {
+    dt[, id_idx := vapply(id, function(x) id_to_idx_env[[as.character(x)]], integer(1))]
+  }
+
+  # Unique years, sorted
+  years <- sort(unique(dt$year))
+  n_years <- length(years)
+  year_to_yidx <- integer(0)
+  year_to_yidx <- setNames(seq_len(n_years), as.character(years))
+
+  dt[, year_idx := year_to_yidx[as.character(year)]]
+
+  # --- Step 2: Build (id_idx, year_idx) -> row_idx lookup matrix ---
+  # Matrix of dimension n_ids x n_years; NA means that cell-year is absent
+  row_matrix <- matrix(NA_integer_, nrow = n_ids, ncol = n_years)
+  row_matrix[cbind(dt$id_idx, dt$year_idx)] <- dt$row_idx
+
+  # --- Step 3: Build edge list of ALL directed neighbor pairs ---
+  # For each cell i in id_order, neighbors are rook_neighbors_unique[[i]]
+  # These are indices into id_order (standard spdep::nb format)
+  # Build: from_id_idx, to_id_idx
+  from_id_idx <- rep(seq_len(n_ids), lengths(rook_neighbors_unique))
+  to_id_idx   <- unlist(rook_neighbors_unique)
+  # Remove 0-neighbor entries (spdep uses integer(0) for no neighbors;
+  # lengths would be 0, which produces nothing in rep/unlistâ€”safe)
+
+  n_edges <- length(from_id_idx)
+  cat(sprintf("Total directed neighbor edges (spatial): %d\n", n_edges))
+
+  # --- Step 4: Expand edges across all years ---
+  # For each spatial edge (from, to), and for each year y:
+  #   source_row = row_matrix[from_id_idx, y]  (the row whose neighbors we want)
+  #   neighbor_row = row_matrix[to_id_idx, y]   (the neighbor's row)
+  # We need both to be non-NA.
+  # Total expanded edges: n_edges * n_years (before NA filtering)
+
+  # Vectorized expansion
+  cat("Expanding edges across years...\n")
+  edge_from <- rep(from_id_idx, times = n_years)
+  edge_to   <- rep(to_id_idx,   times = n_years)
+  edge_year <- rep(seq_len(n_years), each = n_edges)
+
+  # Look up row indices
+  source_rows   <- row_matrix[cbind(edge_from, edge_year)]
+  neighbor_rows <- row_matrix[cbind(edge_to,   edge_year)]
+
+  # Keep only edges where both source and neighbor exist
+  valid <- !is.na(source_rows) & !is.na(neighbor_rows)
+  source_rows   <- source_rows[valid]
+  neighbor_rows <- neighbor_rows[valid]
+
+  cat(sprintf("Valid directed cell-year neighbor edges: %d\n", length(source_rows)))
+
+  # Free memory
+  rm(edge_from, edge_to, edge_year, valid)
+  gc()
+
+  # --- Step 5: Compute neighbor stats per variable ---
+  # For each variable, we need max, min, mean of neighbor values grouped by source_row.
+  # This is a grouped aggregation over the edge list.
+
+  n_rows <- nrow(cell_data)
+
+  for (var_name in neighbor_source_vars) {
+    cat(sprintf("Computing neighbor stats for: %s\n", var_name))
+
+    neighbor_vals <- cell_data[[var_name]][neighbor_rows]
+
+    # Remove edges where the neighbor value is NA
+    non_na <- !is.na(neighbor_vals)
+    src_valid <- source_rows[non_na]
+    val_valid <- neighbor_vals[non_na]
+
+    # Grouped aggregation: max, min, sum, count by source_row
+    # Use data.table for fast grouped operations
+    edge_dt <- data.table(src = src_valid, val = val_valid)
+
+    agg <- edge_dt[, .(
+      nmax  = max(val),
+      nmin  = min(val),
+      nmean = mean(val)
+    ), by = src]
+
+    # Initialize output columns with NA
+    col_max  <- rep(NA_real_, n_rows)
+    col_min  <- rep(NA_real_, n_rows)
+    col_mean <- rep(NA_real_, n_rows)
+
+    col_max[agg$src]  <- agg$nmax
+    col_min[agg$src]  <- agg$nmin
+    col_mean[agg$src] <- agg$nmean
+
+    # Assign to cell_data with original column naming convention
+    # Original function compute_and_add_neighbor_features presumably creates
+    # columns like: neighbor_max_{var}, neighbor_min_{var}, neighbor_mean_{var}
+    cell_data[[paste0("neighbor_max_",  var_name)]] <- col_max
+    cell_data[[paste0("neighbor_min_",  var_name)]] <- col_min
+    cell_data[[paste0("neighbor_mean_", var_name)]] <- col_mean
+
+    rm(edge_dt, agg, neighbor_vals, non_na, src_valid, val_valid,
+       col_max, col_min, col_mean)
+    gc()
+  }
+
+  cat("Done. All neighbor features computed.\n")
+  return(cell_data)
+}
+
+# =============================================================================
+# USAGE â€” drop-in replacement for the original outer loop
+# =============================================================================
+
+# BEFORE (original â€” ~86+ hours):
+# neighbor_lookup <- build_neighbor_lookup(cell_data, id_order, rook_neighbors_unique)
+# for (var_name in neighbor_source_vars) {
+#   cell_data <- compute_and_add_neighbor_features(cell_data, var_name, neighbor_lookup)
+# }
+
+# AFTER (optimized â€” expected ~2-10 minutes on same laptop):
+neighbor_source_vars <- c("ntl", "ec", "pop_density", "def", "usd_est_n2")
+cell_data <- optimize_neighbor_features(
+  cell_data, id_order, rook_neighbors_unique, neighbor_source_vars
+)
+
+# The trained Random Forest model is untouched.
+# The output columns are numerically identical to the original pipeline.
+# Proceed directly to prediction:
+# predictions <- predict(rf_model, cell_data)
+```
+
+## Summary
+
+| Aspect | Colleague's Claim | Actual Finding |
+|---|---|---|
+| **Claimed bottleneck** | `do.call(rbind, result)` and list binding in `compute_neighbor_stats()` | Only 5 `rbind` calls on length-3 vectors; takes seconds |
+| **True bottleneck** | â€” | `build_neighbor_lookup()`: ~1.37B character `paste()` + named-vector hash lookups against a 6.46M-entry table, inside a 6.46M-iteration `lapply` |
+| **Root cause** | â€” | Per-row character key construction and lookup in R is ~5â€“50 Âµs/op; at billions of operations this yields 86+ hours |
+| **Fix** | â€” | Replace all character operations with integer matrix indexing `row_matrix[cbind(id_idx, year_idx)]`; vectorize edge expansion; use `data.table` grouped aggregation |
+| **Expected speedup** | â€” | From 86+ hours to **~2â€“10 minutes** (>500Ã— speedup) |
+| **Numerical equivalence** | â€” | Identical `max`, `min`, `mean` per source row; same column names; trained RF model preserved |
+END_RESPONSE>>>

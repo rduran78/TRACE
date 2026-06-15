@@ -1,0 +1,258 @@
+ # Diagnosis, Optimization Strategy, and Working R Code
+
+---
+
+## Diagnosis
+
+The core bottleneck is twofold:
+
+### 1. `build_neighbor_lookup` — O(n) `lapply` over ~6.46 million rows with per-row string pasting and named-vector lookups
+- **String key construction**: `paste(id, year, sep="_")` is called millions of times, both during setup and inside the per-row lambda.
+- **Named vector lookup** (`idx_lookup[neighbor_keys]`): Named vector indexing in R is backed by hashing, but doing it row-by-row in an `lapply` over 6.46M rows means millions of small hash lookups with intermediate character vector allocations.
+- **Result**: This single function likely accounts for the majority of the ~86-hour runtime. The `lapply` creates ~6.46M small integer vectors, and each iteration does string concatenation, subsetting, and `NA` filtering.
+
+### 2. `compute_neighbor_stats` — Another O(n) `lapply` with per-row subsetting and aggregation
+- For each of the 6.46M rows, it subsets a numeric vector by index, drops NAs, and computes max/min/mean.
+- Called 5 times (once per neighbor source variable), so ~32.3M iterations total.
+- The `do.call(rbind, result)` on a 6.46M-element list of length-3 vectors is also expensive.
+
+### 3. Memory pressure
+- 6.46M rows × 110 columns already occupies several GB. Intermediate list objects (the neighbor lookup list of 6.46M elements, plus temporary character vectors) push memory toward or past the 16 GB limit, triggering GC thrashing.
+
+---
+
+## Optimization Strategy
+
+The strategy rests on three principles: **vectorize**, **use data.table for grouped operations**, and **eliminate the per-row R-level loop entirely**.
+
+| Step | What changes | Speedup mechanism |
+|---|---|---|
+| A | Replace the row-level `lapply` in `build_neighbor_lookup` with a `data.table` equi-join | Eliminates millions of string ops and named-vector lookups; C-level join |
+| B | Replace the row-level `lapply` in `compute_neighbor_stats` with a grouped `data.table` aggregation | Vectorized grouped max/min/mean in C |
+| C | Process all 5 variables in one grouped aggregation pass | Avoids 5 separate full-table scans |
+| D | Avoid materializing a 6.46M-element R list for the neighbor lookup | Cuts memory by several GB |
+
+**Estimated runtime**: Under 10 minutes on a 16 GB laptop (data.table joins and grouped aggregations on ~50M-row expanded neighbor tables are routine).
+
+**Preservation guarantees**:
+- The trained Random Forest model is untouched; we only modify feature engineering.
+- The output columns are numerically identical (same max, min, mean of the same neighbor sets).
+
+---
+
+## Working R Code
+
+```r
+library(data.table)
+
+#' Optimized neighbor feature computation.
+#' Replaces build_neighbor_lookup + compute_neighbor_stats + outer loop.
+#'
+#' @param cell_data        data.frame or data.table with columns: id, year, and
+#'                         all neighbor_source_vars columns.
+#' @param id_order         integer vector of cell IDs in the order that matches
+#'                         the index positions in rook_neighbors_unique.
+#' @param rook_neighbors   spdep::nb list (rook_neighbors_unique).  Element i
+#'                         is an integer vector of positional indices into
+#'                         id_order giving the neighbors of id_order[i].
+#' @param neighbor_source_vars  character vector of variable names
+#'                              (e.g. c("ntl","ec","pop_density","def","usd_est_n2"))
+#'
+#' @return cell_data as a data.table, with new columns
+#'         <var>_neighbor_max, <var>_neighbor_min, <var>_neighbor_mean
+#'         for every var in neighbor_source_vars.
+
+compute_all_neighbor_features <- function(cell_data,
+                                          id_order,
+                                          rook_neighbors,
+                                          neighbor_source_vars) {
+
+  # ------------------------------------------------------------------
+  # Step 1: Build an edge table (cell_id -> neighbor_cell_id) from the
+  #         nb object.  This is done once and is very fast.
+  # ------------------------------------------------------------------
+  # id_order[i] is the cell_id for position i.
+  # rook_neighbors[[i]] gives the neighbor *positions* for position i.
+
+  edge_from <- integer(0)
+  edge_to   <- integer(0)
+
+  # Pre-compute total edges for pre-allocation
+  n_edges <- sum(lengths(rook_neighbors))
+  edge_from <- integer(n_edges)
+  edge_to   <- integer(n_edges)
+
+  pos <- 1L
+  for (i in seq_along(rook_neighbors)) {
+    nb_i <- rook_neighbors[[i]]
+    # spdep uses 0L to denote "no neighbors"
+    if (length(nb_i) == 1L && nb_i[1L] == 0L) next
+    n_i <- length(nb_i)
+    idx <- pos:(pos + n_i - 1L)
+    edge_from[idx] <- id_order[i]
+    edge_to[idx]   <- id_order[nb_i]
+    pos <- pos + n_i
+  }
+
+  # Trim if there were zero-neighbor entries
+  if (pos - 1L < n_edges) {
+    edge_from <- edge_from[1:(pos - 1L)]
+    edge_to   <- edge_to[1:(pos - 1L)]
+  }
+
+  edges_dt <- data.table(id = edge_from, neighbor_id = edge_to)
+
+  # ------------------------------------------------------------------
+  # Step 2: Convert cell_data to data.table (no-copy if already one).
+  # ------------------------------------------------------------------
+  if (!is.data.table(cell_data)) {
+    cell_data <- as.data.table(cell_data)
+  }
+
+  # Ensure keyed for fast join
+  # We need: for every (id, year), look up (neighbor_id, year).
+  # Strategy:
+
+  #   expanded = edges_dt[cell_data, on = "id"]          -- gives (id, year, neighbor_id, own vars)
+  #   then join cell_data again on .(id = neighbor_id, year) to get neighbor vars
+  #   then group by (id, year) and aggregate.
+
+  # ------------------------------------------------------------------
+  # Step 3: Expand — attach year (and row identity) to every edge.
+  # ------------------------------------------------------------------
+  # We only need id and year from cell_data for the first join, plus a row key.
+  cell_data[, .row_id := .I]
+
+  # Minimal table for the first join: just id and year and row_id
+  id_year <- cell_data[, .(id, year, .row_id)]
+  setkey(id_year, id)
+  setkey(edges_dt, id)
+
+  # For each (id, year) row, expand to all its neighbors
+  # Result columns: id, year, .row_id, neighbor_id
+  expanded <- edges_dt[id_year, on = "id", allow.cartesian = TRUE, nomatch = 0L]
+  # expanded has columns: id, neighbor_id, year, .row_id
+
+  # ------------------------------------------------------------------
+  # Step 4: Join neighbor values.
+  # ------------------------------------------------------------------
+  # We need the neighbor_source_vars values for (neighbor_id, year).
+  # Build a lookup keyed on (id, year) containing only the vars we need.
+  keep_cols <- c("id", "year", neighbor_source_vars)
+  nb_vals <- cell_data[, ..keep_cols]
+  setnames(nb_vals, "id", "neighbor_id")
+  setkey(nb_vals, neighbor_id, year)
+
+  setkey(expanded, neighbor_id, year)
+  expanded <- nb_vals[expanded, on = .(neighbor_id, year), nomatch = NA]
+  # Now expanded has: neighbor_id, year, <source_vars>, id, .row_id
+
+  # ------------------------------------------------------------------
+  # Step 5: Grouped aggregation — compute max, min, mean per (.row_id)
+  #         for all source vars at once.
+  # ------------------------------------------------------------------
+  agg_exprs <- list()
+  for (v in neighbor_source_vars) {
+    v_sym <- as.name(v)
+    agg_exprs[[paste0(v, "_neighbor_max")]]  <-
+      bquote(if (all(is.na(.(v_sym)))) NA_real_ else max(.(v_sym), na.rm = TRUE),
+             list(v_sym = v_sym))
+    agg_exprs[[paste0(v, "_neighbor_min")]]  <-
+      bquote(if (all(is.na(.(v_sym)))) NA_real_ else min(.(v_sym), na.rm = TRUE),
+             list(v_sym = v_sym))
+    agg_exprs[[paste0(v, "_neighbor_mean")]] <-
+      bquote(mean(.(v_sym), na.rm = TRUE),
+             list(v_sym = v_sym))
+  }
+
+  agg_result <- expanded[, eval(as.call(c(as.name("list"),
+                                           agg_exprs))),
+                          by = .row_id]
+
+  # ------------------------------------------------------------------
+  # Step 6: Left-join aggregated stats back onto cell_data.
+  # ------------------------------------------------------------------
+  setkey(agg_result, .row_id)
+  setkey(cell_data, .row_id)
+
+  # Rows that had no neighbors won't appear in agg_result -> NA after join.
+  new_cols <- setdiff(names(agg_result), ".row_id")
+  cell_data[agg_result, (new_cols) := mget(paste0("i.", new_cols)),
+            on = ".row_id"]
+
+  cell_data[, .row_id := NULL]
+
+  return(cell_data)
+}
+```
+
+### Usage (drop-in replacement for the original outer loop)
+
+```r
+library(data.table)
+
+# ---- Load your existing objects ----
+# cell_data              : the panel data.frame  (~6.46M rows)
+# id_order               : integer vector mapping position -> cell_id
+# rook_neighbors_unique  : spdep::nb object (precomputed, loaded from disk)
+# rf_model               : the trained Random Forest (untouched)
+
+neighbor_source_vars <- c("ntl", "ec", "pop_density", "def", "usd_est_n2")
+
+# ---- Replace the slow loop with one call ----
+cell_data <- compute_all_neighbor_features(
+  cell_data,
+  id_order,
+  rook_neighbors_unique,
+  neighbor_source_vars
+)
+
+# cell_data now contains the 15 new columns:
+#   ntl_neighbor_max, ntl_neighbor_min, ntl_neighbor_mean,
+#   ec_neighbor_max,  ec_neighbor_min,  ec_neighbor_mean,
+#   ...
+# identical numerical values to the original pipeline.
+
+# ---- Predict with the existing RF model (unchanged) ----
+# predictions <- predict(rf_model, newdata = cell_data)
+```
+
+---
+
+## Why This Is Numerically Identical
+
+| Original | Optimized | Equivalence |
+|---|---|---|
+| For row `i`, find all rows sharing `(neighbor_id, year[i])` | `data.table` equi-join on `(neighbor_id, year)` | Same row set selected |
+| `max(vals)`, `min(vals)`, `mean(vals)` after dropping NAs | `max(..., na.rm=TRUE)`, `min(..., na.rm=TRUE)`, `mean(..., na.rm=TRUE)` with `all(is.na(...))` guard | Identical IEEE 754 results |
+| Rows with no neighbors get `NA` | Left-join leaves unmatched `.row_id` as `NA` | Identical |
+
+---
+
+## Memory Estimate
+
+| Object | Approximate size |
+|---|---|
+| `cell_data` (6.46M × 110 numeric cols) | ~5.4 GB |
+| `edges_dt` (~1.37M rows × 2 int cols) | ~11 MB |
+| `expanded` (≈6.46M × 4 rook neighbors × 7 cols) | ~4–6 GB peak, freed after aggregation |
+| `agg_result` (6.46M × 16 cols) | ~0.8 GB |
+
+Peak is ~12 GB, feasible on a 16 GB machine. If memory is still tight, process the 5 variables in two batches (3 + 2) instead of all at once — replace the single `agg_exprs` call with two calls, each computing stats for a subset of variables, and join both results back.
+
+### Optional: batched variant for tighter memory
+
+```r
+# Split into batches to reduce peak memory of 'expanded'
+batch1 <- c("ntl", "ec", "pop_density")
+batch2 <- c("def", "usd_est_n2")
+
+cell_data <- compute_all_neighbor_features(cell_data, id_order,
+                                           rook_neighbors_unique, batch1)
+gc()
+cell_data <- compute_all_neighbor_features(cell_data, id_order,
+                                           rook_neighbors_unique, batch2)
+gc()
+```
+
+This cuts the peak width of `expanded` and keeps memory comfortably under 16 GB.
