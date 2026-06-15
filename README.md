@@ -216,7 +216,7 @@ All individual files are well under GitHub's 100 MB file limit. Total repository
 
 ## Citation
 
-Garcia, P., Duran-Fernandez, R., and Figueroa, D. (2026). Prompt Framing Determines Whether Frontier Language Models Discover an Algorithmic Reformulation in Scientific Code: The TRACE Prompt-Ablation Experiment. *AI Letters*. *(Citation to be completed upon publication.)*
+Garcia, P., Duran-Fernandez, R., and Figueroa, D. (2026). Prompt Framing Determines Whether Frontier Language Models Discover an Algorithmic Reformulation in Scientific Code: The TRACE Prompt-Ablation Experiment. *(Citation to be completed upon publication.)*
 
 ---
 
